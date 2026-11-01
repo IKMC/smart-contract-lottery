@@ -1,0 +1,176 @@
+import { multicall, } from '../../actions/public/multicall.js';
+import { readContract, } from '../../actions/public/readContract.js';
+import { BaseError } from '../../errors/base.js';
+import { ContractFunctionRevertedError } from '../../errors/contract.js';
+import { disputeGameAbi, l2OutputOracleAbi, portal2Abi, portalAbi, } from '../abis.js';
+import { getPortalVersion } from './getPortalVersion.js';
+const buffer = 10;
+/**
+ * Returns the time until the withdrawal transaction can be finalized. Used for the [Withdrawal](/op-stack/guides/withdrawals) flow.
+ *
+ * - Docs: https://viem.sh/op-stack/actions/getTimeToFinalize
+ *
+ * @param client - Client to use
+ * @param parameters - {@link GetTimeToFinalizeParameters}
+ * @returns Time until finalize. {@link GetTimeToFinalizeReturnType}
+ *
+ * @example
+ * import { createPublicClient, http } from 'viem'
+ * import { getBlockNumber } from 'viem/actions'
+ * import { mainnet, optimism } from 'viem/chains'
+ * import { getTimeToFinalize } from 'viem/op-stack'
+ *
+ * const publicClientL1 = createPublicClient({
+ *   chain: mainnet,
+ *   transport: http(),
+ * })
+ * const publicClientL2 = createPublicClient({
+ *   chain: optimism,
+ *   transport: http(),
+ * })
+ *
+ * const receipt = await publicClientL2.getTransactionReceipt({
+ *   hash: '0x9a2f4283636ddeb9ac32382961b22c177c9e86dd3b283735c154f897b1a7ff4a',
+ * })
+ *
+ * const [withdrawal] = getWithdrawals(receipt)
+ *
+ * const { seconds } = await getTimeToFinalize(publicClientL1, {
+ *   withdrawalHash: withdrawal.withdrawalHash,
+ *   targetChain: optimism
+ * })
+ */
+export async function getTimeToFinalize(client, parameters) {
+    const { chain = client.chain, withdrawalHash, targetChain } = parameters;
+    const portalAddress = (() => {
+        if (parameters.portalAddress)
+            return parameters.portalAddress;
+        if (chain)
+            return targetChain.contracts.portal[chain.id].address;
+        return Object.values(targetChain.contracts.portal)[0].address;
+    })();
+    const portalVersion = await getPortalVersion(client, { portalAddress });
+    // Legacy
+    if (portalVersion.major < 3) {
+        const l2OutputOracleAddress = (() => {
+            if (parameters.l2OutputOracleAddress)
+                return parameters.l2OutputOracleAddress;
+            if (chain)
+                return targetChain.contracts.l2OutputOracle[chain.id].address;
+            return Object.values(targetChain.contracts.l2OutputOracle)[0].address;
+        })();
+        const [[_outputRoot, proveTimestamp, _l2OutputIndex], period] = await multicall(client, {
+            allowFailure: false,
+            contracts: [
+                {
+                    abi: portalAbi,
+                    address: portalAddress,
+                    functionName: 'provenWithdrawals',
+                    args: [withdrawalHash],
+                },
+                {
+                    abi: l2OutputOracleAbi,
+                    address: l2OutputOracleAddress,
+                    functionName: 'FINALIZATION_PERIOD_SECONDS',
+                },
+            ],
+        });
+        const secondsSinceProven = Date.now() / 1000 - Number(proveTimestamp);
+        const secondsToFinalize = Number(period) - secondsSinceProven;
+        const seconds = Math.floor(secondsToFinalize < 0 ? 0 : secondsToFinalize + buffer);
+        const timestamp = Date.now() + seconds * 1000;
+        return { period: Number(period), seconds, timestamp };
+    }
+    const numProofSubmitters = await readContract(client, {
+        abi: portal2Abi,
+        address: portalAddress,
+        functionName: 'numProofSubmitters',
+        args: [withdrawalHash],
+    }).catch(() => 1n);
+    const proofSubmitter = await readContract(client, {
+        abi: portal2Abi,
+        address: portalAddress,
+        functionName: 'proofSubmitters',
+        args: [withdrawalHash, numProofSubmitters - 1n],
+    }).catch(() => undefined);
+    const [[disputeGameProxy, proveTimestamp], proofMaturityDelaySeconds] = await Promise.all([
+        proofSubmitter
+            ? readContract(client, {
+                abi: portal2Abi,
+                address: portalAddress,
+                functionName: 'provenWithdrawals',
+                args: [withdrawalHash, proofSubmitter],
+            })
+            : Promise.resolve(['0x', 0n]),
+        readContract(client, {
+            abi: portal2Abi,
+            address: portalAddress,
+            functionName: 'proofMaturityDelaySeconds',
+        }),
+    ]);
+    if (proveTimestamp === 0n)
+        throw new BaseError('Withdrawal has not been proven on L1.');
+    // The withdrawal can only be finalized once the proof's dispute game is
+    // resolved and its finality delay has passed, so also read the game.
+    const [resolvedAt, createdAt, expectedResolution, maxClockDuration, disputeGameFinalityDelaySeconds,] = await Promise.all([
+        readContract(client, {
+            abi: disputeGameAbi,
+            address: disputeGameProxy,
+            functionName: 'resolvedAt',
+        }),
+        readContract(client, {
+            abi: disputeGameAbi,
+            address: disputeGameProxy,
+            functionName: 'createdAt',
+        }),
+        // Only some game types implement `expectedResolution` (e.g. `AggregateVerifier`).
+        readContract(client, {
+            abi: disputeGameAbi,
+            address: disputeGameProxy,
+            functionName: 'expectedResolution',
+        }).catch(unsupported),
+        // Only some game types implement `maxClockDuration` (e.g. `FaultDisputeGame`).
+        readContract(client, {
+            abi: disputeGameAbi,
+            address: disputeGameProxy,
+            functionName: 'maxClockDuration',
+        }).catch(unsupported),
+        readContract(client, {
+            abi: portal2Abi,
+            address: portalAddress,
+            functionName: 'disputeGameFinalityDelaySeconds',
+        }),
+    ]);
+    const now = Date.now() / 1000;
+    // When the game is not resolved yet, estimate when it will be: the expected
+    // resolution reported by the game, or the end of an unchallenged root claim's clock.
+    // An unresolved game cannot have resolved in the past, so the estimate is at least `now`.
+    const gameResolvedAt = (() => {
+        if (resolvedAt > 0n)
+            return Number(resolvedAt);
+        const estimate = (() => {
+            if (typeof expectedResolution === 'bigint')
+                return expectedResolution;
+            if (typeof maxClockDuration === 'bigint')
+                return createdAt + maxClockDuration;
+            return undefined;
+        })();
+        // Without an estimate, only the proof maturity delay applies.
+        if (estimate === undefined)
+            return 0;
+        return Math.max(Number(estimate), now);
+    })();
+    const secondsToProofMaturity = Number(proofMaturityDelaySeconds) - (now - Number(proveTimestamp));
+    const secondsToGameFinality = gameResolvedAt + Number(disputeGameFinalityDelaySeconds) - now;
+    const secondsToFinalize = Math.max(secondsToProofMaturity, secondsToGameFinality);
+    const seconds = Math.floor(secondsToFinalize < 0 ? 0 : secondsToFinalize + buffer);
+    const timestamp = Date.now() + seconds * 1000;
+    return { period: Number(proofMaturityDelaySeconds), seconds, timestamp };
+}
+/** Returns `undefined` when the game does not implement the getter, and rethrows other errors. */
+function unsupported(error) {
+    if (error.cause instanceof ContractFunctionRevertedError)
+        return undefined;
+    throw error;
+}
+//# sourceMappingURL=getTimeToFinalize.js.map

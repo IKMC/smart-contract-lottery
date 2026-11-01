@@ -1,0 +1,10 @@
+{
+  "schedule": "*/30 * * * * *",
+  "evms": [
+    {
+      "raffleAddress": "0xd5ebEe26A4D5D548A50f828f349CB817408bb673",
+      "chainSelectorName": "ethereum-testnet-sepolia",
+      "gasLimit": "800000"
+    }
+  ]
+}

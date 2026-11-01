@@ -1,0 +1,36 @@
+{
+  "transactions": [
+    {
+      "hash": "0x2cd4e9961b599d433895129c042b503e9a07e600bbbea0d440aeba7060c41fda",
+      "transactionType": "CALL",
+      "contractName": null,
+      "contractAddress": "0x779877a7b0d9e8603169ddbd7836e478b4624789",
+      "function": "transferAndCall(address,uint256,bytes)",
+      "functionAbi": "function transferAndCall(address _to, uint256 _value, bytes _data) returns (bool success)",
+      "arguments": [
+        "0x9DdfaCa8183c41ad55329BdeeD9F6A8d53168B1B",
+        "3000000000000000000",
+        "0xcd8b7f8c1cfc92f560c2f3ac106d2605ad9239f94b3f5841d98bff55fa74653a"
+      ],
+      "transaction": {
+        "from": "0xbcd966d5dfdfc379199747d7cb840ffc5ae9b72f",
+        "to": "0x779877a7b0d9e8603169ddbd7836e478b4624789",
+        "gas": "0x14cbb",
+        "value": "0x0",
+        "input": "0x4000aea00000000000000000000000009ddfaca8183c41ad55329bdeed9f6a8d53168b1b00000000000000000000000000000000000000000000000029a2241af62c000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000020cd8b7f8c1cfc92f560c2f3ac106d2605ad9239f94b3f5841d98bff55fa74653a",
+        "nonce": "0x1e",
+        "chainId": "0xaa36a7"
+      },
+      "additionalContracts": [],
+      "isFixedGasLimit": false
+    }
+  ],
+  "receipts": [],
+  "libraries": [],
+  "pending": [],
+  "returns": {},
+  "timestamp": 1793431921647,
+  "chain": 11155111,
+  "commit": null,
+  "recovery_generation": "0x2031bf8a4f91abebd3532c1f80cf112c2aa7648604fee57f698618d4ddcc84d2"
+}
